@@ -1,0 +1,17 @@
+# Build output: PyInstaller's work dir, the frozen bundles, and the zips
+# make_zips.py writes next to them.
+build/
+dist/
+
+# PyInstaller emits a spec-derived cache here in some versions.
+*.spec.bak
+
+__pycache__/
+*.py[cod]
+
+# CI smoke test scratch, and any local workspace the CLI creates.
+ci-ws/
+_ws*/
+
+# The archive corpus is 229 MB and lives outside the repo on purpose.
+*.zip

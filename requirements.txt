@@ -1,0 +1,6 @@
+# Runtime dependencies: none.
+#
+# The application is deliberately stdlib-only (tkinter for the GUI, zipfile/
+# tarfile/gzip/bz2/lzma for archives), so the frozen builds stay small and have
+# no third-party supply chain. PyInstaller is a build-time dependency only and
+# lives in requirements-build.txt.

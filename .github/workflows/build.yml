@@ -1,0 +1,112 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-latest, artifact: Cluster-log-analyzer-win-x64}
+          # Pin 22.04, not latest: PyInstaller output is only forward-compatible
+          # on glibc, so a binary built on 24.04 fails on 22.04 with
+          # "GLIBC_2.39 not found".
+          - {os: ubuntu-22.04, artifact: Cluster-log-analyzer-linux-x64}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # tkinter is the one dependency that can fail silently: PyInstaller's
+      # tkinter hook finds nothing, emits no error, and the bundle dies at
+      # startup on the user's machine. Install tcl/tk and then PROVE the
+      # interpreter has _tkinter before building -- a broken build is much
+      # cheaper to catch here than in a bug report.
+      - name: Install tk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk8.6 xvfb
+          python -c "import tkinter; print('tkinter OK', tkinter.TkVersion)"
+
+      - name: Verify tkinter (Windows)
+        if: runner.os == 'Windows'
+        run: python -c "import tkinter; print('tkinter OK', tkinter.TkVersion)"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-build.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Build
+        shell: bash
+        run: |
+          python -m PyInstaller --clean --noconfirm packaging/log-analyzer.spec
+          python -m PyInstaller --clean --noconfirm packaging/log-analyzer-cli.spec
+
+      # The frozen bundle is what actually ships, so assert the thing the hook
+      # can silently omit is in it.
+      - name: Check the bundle carries the tk runtime
+        shell: bash
+        run: |
+          test -d dist/Cluster-log-analyzer/_internal/_tcl_data || {
+            echo "::error::_tcl_data missing from the GUI bundle"; exit 1; }
+          test -d dist/Cluster-log-analyzer/_internal/_tk_data || {
+            echo "::error::_tk_data missing from the GUI bundle"; exit 1; }
+          ls dist/Cluster-log-analyzer/_internal/ | grep -iE '(_tkinter|tcl86t|tk86t)' || {
+            echo "::error::_tkinter extension missing"; exit 1; }
+          echo "tk runtime present in bundle"
+
+      - name: Smoke-test the CLI bundle
+        shell: bash
+        run: |
+          ./dist/Cluster-log-analyzer-cli/Cluster-log-analyzer-cli --version
+          # --workspace is defined on the top-level parser, so it must come
+          # before the subcommand; argparse rejects it after.
+          ./dist/Cluster-log-analyzer-cli/Cluster-log-analyzer-cli --workspace ./ci-ws cache list
+
+      # Starting the real GUI is the only check that would have caught a
+      # hook-skipped tkinter. It runs under a virtual display on Linux and
+      # touches no window manager; "still alive after N seconds" means the
+      # frozen app got past Tk() construction.
+      - name: Smoke-test the GUI bundle
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys, tempfile, time
+
+          exe = './dist/Cluster-log-analyzer/Cluster-log-analyzer'
+          if os.name == 'nt':
+              exe += '.exe'
+          env = dict(os.environ)
+          # Keep the smoke test out of the real cache location.
+          env['XDG_CACHE_HOME'] = tempfile.mkdtemp()
+          env['LOCALAPPDATA'] = tempfile.mkdtemp()
+
+          cmd = [exe]
+          if sys.platform.startswith('linux'):
+              cmd = ['xvfb-run', '-a'] + cmd
+          p = subprocess.Popen(cmd, env=env)
+          time.sleep(12)
+          if p.poll() is not None:
+              sys.exit('GUI exited early with code %s' % p.returncode)
+          p.terminate()
+          print('GUI stayed up for 12s')
+          PY
+
+      - name: Package zips
+        run: python packaging/make_zips.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.zip
+          if-no-files-found: error
