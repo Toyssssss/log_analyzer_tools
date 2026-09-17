@@ -61,8 +61,18 @@ jobs:
             echo "::error::_tcl_data missing from the GUI bundle"; exit 1; }
           test -d dist/Cluster-log-analyzer/_internal/_tk_data || {
             echo "::error::_tk_data missing from the GUI bundle"; exit 1; }
-          ls dist/Cluster-log-analyzer/_internal/ | grep -iE '(_tkinter|tcl86t|tk86t)' || {
-            echo "::error::_tkinter extension missing"; exit 1; }
+          # List first, assert second: if this ever fails, the log has to
+          # say WHAT was actually in the bundle, otherwise the only possible
+          # next step is guessing. Naming differs by platform --
+          # _tkinter.pyd vs _tkinter.cpython-3xx-*.so, tcl86t.dll vs
+          # libtcl8.6.so -- so match loosely and print everything.
+          echo "--- tk/tcl/interpreter files in the bundle ---"
+          find dist/Cluster-log-analyzer -iname '*tkinter*' -o -iname '*tcl*' -o -iname '*tk8*' | sort
+          echo "--- _internal dir (first 40) ---"
+          ls dist/Cluster-log-analyzer/_internal/ | head -40
+
+          find dist/Cluster-log-analyzer -name '_tkinter*' | grep -q . || {
+            echo "::error::_tkinter extension missing from the bundle"; exit 1; }
           echo "tk runtime present in bundle"
 
       - name: Smoke-test the CLI bundle
