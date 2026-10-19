@@ -154,7 +154,9 @@ class UsableTest(unittest.TestCase):
         target = os.path.join(self.tmp, 'ro')
         os.makedirs(target)
         os.chmod(target, 0o500)
-        self.addCleanup(os.chmod, target, 0o700)
+        # No chmod-back cleanup: tearDown rmtree's the whole temp tree (the
+        # empty read-only dir is removable because rmdir checks the parent),
+        # and restoring the mode after that would chmod a missing path.
         ok, why = settings.workspace_is_usable(target)
         self.assertFalse(ok)
         self.assertTrue(why)

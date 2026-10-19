@@ -47,7 +47,9 @@ class FlatScanTest(_TreeFixture):
         self.write('a/b/c.log', b'x')
         entry = scan_flat(self.tmp).entries[0]
         self.assertEqual(entry.vp, 'a/b/c.log')
-        self.assertNotIn(os.sep, entry.vp)
+        # vp always uses '/', never the native separator: os.sep is '\\' on
+        # Windows and '/' on POSIX, so only the explicit backslash is stable.
+        self.assertNotIn('\\', entry.vp)
         # FileEntry.name splits on '/', so this would break on a Windows path.
         self.assertEqual(entry.name, 'c.log')
 
