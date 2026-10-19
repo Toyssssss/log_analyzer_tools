@@ -3,7 +3,8 @@ import tempfile
 import unittest
 
 from log_analyzer.detail import (
-    line_matches, match_ranges, parse_terms, read_lines, select_lines,
+    keyword_pattern, line_matches, match_ranges, parse_terms, read_lines,
+    select_lines,
 )
 
 
@@ -100,6 +101,32 @@ class SelectLinesTest(unittest.TestCase):
     def test_out_of_range_kept_indices_are_dropped(self):
         got = select_lines(self.LINES, [], False, keep=[1, 99])
         self.assertEqual([i for i, _ in got], [1])
+
+
+class KeywordPatternTest(unittest.TestCase):
+    """The pane highlights what the search matched -- including every term of
+    a multi-keyword box, or the highlight would disagree with the results."""
+
+    def test_single_keyword_spans_are_unchanged(self):
+        p = keyword_pattern('sub_temp')
+        self.assertEqual(match_ranges('a sub_temp b', [], False, [p]), [(2, 10)])
+
+    def test_every_term_is_highlighted(self):
+        p = keyword_pattern('522 sub_temp')
+        got = match_ranges('522 and sub_temp here', [], False, [p])
+        self.assertEqual(got, [(0, 3), (8, 16)])
+
+    def test_whole_word_applies_per_term(self):
+        p = keyword_pattern('sub_temp', whole_word=True)
+        self.assertIsNone(p.search('sub_temp_extra'))
+        self.assertIsNotNone(p.search('a sub_temp b'))
+
+    def test_match_case_reaches_the_pattern(self):
+        self.assertIsNone(keyword_pattern('abc', match_case=True).search('ABC'))
+        self.assertIsNotNone(keyword_pattern('abc').search('ABC'))
+
+    def test_blank_keyword_yields_nothing(self):
+        self.assertIsNone(keyword_pattern('   '))
 
 
 class FakeSource:

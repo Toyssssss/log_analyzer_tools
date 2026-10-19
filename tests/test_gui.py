@@ -1,12 +1,15 @@
 import gc
+import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import tkinter as tk
 
 from log_analyzer.manifest import FileEntry, Manifest
 from log_analyzer.paths import archive_key
+from log_analyzer.scope import for_archive
 from log_analyzer.search import FileHits, Hit
 from tests.fixtures import build_zip, write
 
@@ -100,6 +103,44 @@ class ResultTreeTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0].entry.vp, 'a.zip/x.log')
 
+    def test_selected_file_on_a_file_row(self):
+        self.tree.append_batch([self._fh('a.zip/x.log', [(1, 'one')])])
+        iid = self.tree.tree.get_children('')[0]
+        self.tree.tree.selection_set(iid)
+        self.assertEqual(self.tree.selected_file().entry.vp, 'a.zip/x.log')
+
+    def test_selected_file_climbs_from_a_hit_line(self):
+        # A hit line is a child node and never a key in _files, so without the
+        # climb to the parent the context menu would act on nothing.
+        self.tree.append_batch([self._fh('a.zip/x.log', [(1, 'one')])])
+        iid = self.tree.tree.get_children('')[0]
+        self.tree._materialise(iid)
+        child = self.tree.tree.get_children(iid)[0]
+        self.assertNotIn(child, self.tree._files)
+        self.tree.tree.selection_set(child)
+        self.assertEqual(self.tree.selected_file().entry.vp, 'a.zip/x.log')
+
+    def test_selected_file_is_none_without_a_selection(self):
+        self.tree.append_batch([self._fh('a.zip/x.log', [(1, 'one')])])
+        self.tree.tree.selection_remove(*self.tree.tree.selection())
+        self.assertIsNone(self.tree.selected_file())
+
+    def test_export_callback_receives_the_row(self):
+        seen = []
+        self.tree.on_export_txt = seen.append
+        self.tree.append_batch([self._fh('a.zip/x.log', [(1, 'one')])])
+        iid = self.tree.tree.get_children('')[0]
+        self.tree.tree.selection_set(iid)
+        self.tree._export_txt()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].entry.vp, 'a.zip/x.log')
+
+    def test_popup_has_the_export_entry_first(self):
+        labels = [self.tree.popup.entrycget(i, 'label')
+                  for i in range(self.tree.popup.index('end') + 1)
+                  if self.tree.popup.type(i) != 'separator']
+        self.assertTrue(labels[0].startswith('Export as text file'))
+
 
 @unittest.skipUnless(HAVE_TK, 'no display available')
 class AppFlowTest(unittest.TestCase):
@@ -133,7 +174,7 @@ class AppFlowTest(unittest.TestCase):
         end = time.time() + seconds
         while time.time() < end:
             self.root.update()
-            if self.app.job is None and self.app.manifest is not None:
+            if self.app.job is None and self.app.scope is not None:
                 return True
             time.sleep(0.01)
         return False
@@ -150,8 +191,7 @@ class AppFlowTest(unittest.TestCase):
         from log_analyzer.extractor import extract_archive
         key = archive_key(path)
         man = extract_archive(path, self.ws, key)
-        self.app.key = key
-        self.app.manifest = man
+        self.app._set_scope(for_archive(self.ws, key, man))
 
         self.app.kw_var.set('sub_temp')
         self.app.on_search()
@@ -170,8 +210,7 @@ class AppFlowTest(unittest.TestCase):
         from log_analyzer.extractor import extract_archive
         key = archive_key(path)
         man = extract_archive(path, self.ws, key)
-        self.app.key = key
-        self.app.manifest = man
+        self.app._set_scope(for_archive(self.ws, key, man))
 
         self.app.kw_var.set('sub_temp')
         self.app.word_var.set(True)
@@ -182,14 +221,373 @@ class AppFlowTest(unittest.TestCase):
         self.assertEqual(fh.total_hits, 1)
         self.assertIn('was here', fh.hits[0].line)
 
+    def _load_zip(self, name, entries):
+        path = os.path.join(self.tmp, name)
+        write(path, build_zip(entries))
+        from log_analyzer.extractor import extract_archive
+        key = archive_key(path)
+        man = extract_archive(path, self.ws, key)
+        self.app._set_scope(for_archive(self.ws, key, man))
+        return key
+
+    def _fh_for(self, suffix):
+        # entry.vp is the full virtual path, root archive name included, so
+        # match on the tail to keep the call sites readable.
+        for iid, fh in self.app.results._files.items():
+            if fh.entry.vp.endswith(suffix):
+                return fh
+        self.fail('no result row ending in %s (have %s)' % (
+            suffix, [fh.entry.vp for fh in self.app.results._files.values()]))
+
+    def test_export_file_txt_writes_the_whole_file(self):
+        # The export is the whole member, not fh.hits: a file of isolated hit
+        # lines is not a log any more, which is the entire point of handing
+        # one to somebody else.
+        leaf = (b'08-28 00:23:09.180 506 522 I TAG: sub_temp is 42\n'
+                b'08-28 00:23:09.181 506 522 I TAG: unrelated context\n'
+                b'08-28 00:23:09.182 506 522 I TAG: tail\n')
+        self._load_zip('Log_E.zip', {'hilog/el2.log': leaf})
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+
+        fh = self._fh_for('hilog/el2.log')
+        self.assertEqual(len(fh.hits), 1)
+        dest = os.path.join(self.tmp, 'out.txt')
+        with patch('log_analyzer.gui.app.filedialog.asksaveasfilename',
+                   return_value=dest) as dlg:
+            self.app.on_export_file_txt(fh)
+
+        # Default name is the stem plus '.txt', not the member's own '.log'.
+        self.assertTrue(dlg.call_args[1]['initialfile'].endswith('.txt'))
+        self.assertEqual(dlg.call_args[1]['initialfile'], 'hilog_el2.txt')
+
+        with open(dest, encoding='utf-8', newline='') as f:
+            text = f.read()
+        self.assertEqual(text.count('\n'), 3)      # all three lines present
+        self.assertIn('unrelated context', text)   # including the non-hit one
+        self.assertTrue(text.endswith('\n'))
+
+    def test_export_file_txt_transcodes_gbk_to_utf8(self):
+        leaf = '温度过高 sub_temp\n'.encode('gbk')
+        self._load_zip('Log_G.zip', {'hilog/gbk.log': leaf})
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+
+        fh = self._fh_for('hilog/gbk.log')
+        dest = os.path.join(self.tmp, 'gbk.txt')
+        with patch('log_analyzer.gui.app.filedialog.asksaveasfilename',
+                   return_value=dest):
+            self.app.on_export_file_txt(fh)
+
+        with open(dest, encoding='utf-8') as f:
+            self.assertIn('温度过高', f.read())
+
+    def test_export_file_txt_cancelled_dialog_writes_nothing(self):
+        self._load_zip('Log_C.zip', {'a.log': b'sub_temp\n'})
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        fh = self._fh_for('a.log')
+
+        before = self.app.status_var.get()
+        with patch('log_analyzer.gui.app.filedialog.asksaveasfilename',
+                   return_value=''):
+            self.app.on_export_file_txt(fh)
+        self.assertEqual(self.app.status_var.get(), before)
+
+    def test_export_file_txt_reports_an_unreadable_member(self):
+        # fh.error rows are already badged in the tree; a right-click must not
+        # silently write a zero-line file named after them.
+        self._load_zip('Log_R.zip', {'a.log': b'sub_temp\n'})
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        fh = self._fh_for('a.log')
+        fh.error = 'simulated read failure'
+
+        with patch('log_analyzer.gui.app.messagebox.showerror') as err:
+            self.app.on_export_file_txt(fh)
+        self.assertTrue(err.called)
+        self.assertIn('simulated read failure', str(err.call_args))
+
+    def _flat_tree(self):
+        """A folder of plain logs, plus the workspace path, so a test can
+        prove nothing was copied into it."""
+        logs = os.path.join(self.tmp, 'logs')
+        write(os.path.join(logs, 'hilog', 'el2.log'),
+              b'08-28 00:23:09.180 506 522 I TAG: sub_temp is 42\n'
+              b'08-28 00:23:09.181 506 522 I TAG: other\n')
+        write(os.path.join(logs, 'kmsg.log'), b'nothing here\n')
+        return logs
+
+    def test_open_folder_searches_in_place_without_extracting(self):
+        logs = self._flat_tree()
+        self.app._load(logs)
+        self.assertTrue(self.pump(), 'folder scan did not finish')
+
+        self.assertTrue(self.app.scope.flat)
+        self.assertIsNone(self.app.scope.key)
+        # Nothing in this folder is an archive, so nothing was extracted and
+        # no cache directory was created at all.
+        self.assertFalse(os.path.isdir(os.path.join(self.ws, 'archives')))
+
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        self.assertEqual(self.app.results.file_count(), 1)
+        self.assertIn('hilog/el2.log',
+                      [fh.entry.vp for fh in self.app.results._files.values()])
+
+    def test_open_plain_file_falls_back_to_a_flat_scope(self):
+        logs = self._flat_tree()
+        single = os.path.join(logs, 'hilog', 'el2.log')
+        self.app._load(single)
+        self.assertTrue(self.pump())
+        self.assertTrue(self.app.scope.flat)
+        self.assertEqual(len(self.app.scope.entries), 1)
+        self.assertFalse(os.path.isdir(os.path.join(self.ws, 'archives')))
+
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        self.assertEqual(self.app.results.file_count(), 1)
+
+    def test_flat_scope_reads_detail_and_exports_in_place(self):
+        # The three call sites (search, detail, export) share scope.source, so
+        # this is what proves none of them still builds a DiskSource.
+        logs = self._flat_tree()
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+
+        fh = self.app.results._files[list(self.app.results._files)[0]]
+        lines, trunc = self.app._load_lines(fh.entry)
+        self.assertTrue(any('sub_temp' in ln for ln in lines))
+        self.assertFalse(trunc)
+
+        dest = os.path.join(self.tmp, 'flat-out.txt')
+        with patch('log_analyzer.gui.app.filedialog.asksaveasfilename',
+                   return_value=dest):
+            self.app.on_export_file_txt(fh)
+        with open(dest, encoding='utf-8') as f:
+            self.assertIn('sub_temp', f.read())
+
+    def test_clear_current_archive_refuses_for_a_flat_scope(self):
+        logs = self._flat_tree()
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        with patch('log_analyzer.gui.app.messagebox') as mb:
+            self.app.on_clear(only_current=True)
+        self.assertTrue(mb.showinfo.called)
+        self.assertIn('in place', str(mb.showinfo.call_args))
+        self.assertIsNotNone(self.app.scope)
+
+    def test_results_heading_says_folder_for_a_flat_scope(self):
+        logs = self._flat_tree()
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        self.assertIn('folder', self.app.results.tree.heading('#0')['text'])
+
+    def test_archive_scope_is_not_flat_and_still_extracts(self):
+        path = os.path.join(self.tmp, 'Log_A.zip')
+        write(path, build_zip({'a.log': b'sub_temp\n'}))
+        # The preflight confirmation is modal; a real archive must still go
+        # down the extract-and-cache path, not the in-place one.
+        with patch('log_analyzer.gui.app.messagebox.askyesno', return_value=True):
+            self.app._load(path)
+            self.assertTrue(self.pump())
+        self.assertFalse(self.app.scope.flat)
+        self.assertIsNotNone(self.app.scope.key)
+        self.assertTrue(os.path.isdir(self.app.scope.source.base))
+
+    def test_change_workspace_persists_and_resets_state(self):
+        self._load_zip('Log_W.zip', {'a.log': b'sub_temp\n'})
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        self.assertEqual(self.app.results.file_count(), 1)
+
+        target = os.path.join(self.tmp, 'other-ws')
+        with patch('log_analyzer.gui.app.filedialog.askdirectory',
+                   return_value=target), \
+                patch('log_analyzer.settings.save_workspace',
+                      return_value=True) as saved:
+            self.app.on_change_workspace()
+
+        self.assertEqual(saved.call_args[0][0], os.path.abspath(target))
+        self.assertEqual(self.app.ws_root, os.path.abspath(target))
+        # Everything bound to the old location is gone.
+        self.assertIsNone(self.app.scope)
+        self.assertEqual(self.app.results.file_count(), 0)
+        # An unsaved preference must not block the switch.
+        self.assertIn('Workspace changed', self.app.status_var.get())
+
+    def test_change_workspace_reports_a_failed_save(self):
+        target = os.path.join(self.tmp, 'other-ws')
+        with patch('log_analyzer.gui.app.filedialog.askdirectory',
+                   return_value=target), \
+                patch('log_analyzer.settings.save_workspace',
+                      return_value=False):
+            self.app.on_change_workspace()
+        self.assertEqual(self.app.ws_root, os.path.abspath(target))
+        self.assertIn('could not be saved', self.app.status_var.get())
+
+    def test_change_workspace_is_refused_while_a_job_runs(self):
+        self.app.job = object()
+        with patch('log_analyzer.gui.app.filedialog.askdirectory') as dlg, \
+                patch('log_analyzer.gui.app.messagebox') as mb:
+            self.app.on_change_workspace()
+        self.assertFalse(dlg.called)
+        self.assertTrue(mb.showinfo.called)
+
+    def test_change_workspace_rejects_an_unusable_folder(self):
+        before = self.app.ws_root
+        target = os.path.join(self.tmp, 'other-ws')
+        with patch('log_analyzer.gui.app.filedialog.askdirectory',
+                   return_value=target), \
+                patch('log_analyzer.settings.workspace_is_usable',
+                      return_value=(False, 'not writable')), \
+                patch('log_analyzer.gui.app.messagebox') as mb:
+            self.app.on_change_workspace()
+        self.assertEqual(self.app.ws_root, before)
+        self.assertTrue(mb.showerror.called)
+
+    def test_startup_uses_the_saved_workspace(self):
+        from log_analyzer.gui.app import App
+        target = os.path.join(self.tmp, 'saved-ws')
+        cfg = os.path.join(self.tmp, 'settings.json')
+        with open(cfg, 'w', encoding='utf-8') as f:
+            json.dump({'workspace': target}, f)
+        with patch('log_analyzer.settings.settings_path', lambda: cfg), \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('LOG_ANALYZER_WORKSPACE', None)
+            app = App(self.root, workspace=None)
+        # Destroyed in tearDown via self.root, like every other widget here;
+        # the App itself is dropped by the normal gc pass.
+        self.assertEqual(app.ws_root, os.path.abspath(target))
+        self.assertEqual(app.ws_origin, 'settings')
+
+    def test_open_chooser_routes_to_the_folder_dialog(self):
+        with patch('log_analyzer.gui.app._pick_target', return_value='folder'), \
+                patch('log_analyzer.gui.app.filedialog.askdirectory',
+                      return_value=self._flat_tree()) as dlg, \
+                patch('log_analyzer.gui.app.filedialog.askopenfilename') as files:
+            self.app.on_open()
+            self.assertTrue(self.pump())
+        self.assertTrue(dlg.called)
+        self.assertFalse(files.called)
+
+    def test_open_chooser_routes_to_the_file_dialog(self):
+        path = os.path.join(self.tmp, 'Log_O.zip')
+        write(path, build_zip({'a.log': b'sub_temp\n'}))
+        with patch('log_analyzer.gui.app._pick_target', return_value='file'), \
+                patch('log_analyzer.gui.app.filedialog.askopenfilename',
+                      return_value=path) as dlg, \
+                patch('log_analyzer.gui.app.filedialog.askdirectory') as dirs, \
+                patch('log_analyzer.gui.app.messagebox.askyesno',
+                      return_value=True):
+            self.app.on_open()
+            self.assertTrue(self.pump())
+        self.assertTrue(dlg.called)
+        self.assertFalse(dirs.called)
+
+    def test_cancelling_the_chooser_opens_nothing(self):
+        with patch('log_analyzer.gui.app._pick_target', return_value=None), \
+                patch('log_analyzer.gui.app.filedialog.askopenfilename') as files, \
+                patch('log_analyzer.gui.app.filedialog.askdirectory') as dirs:
+            self.app.on_open()
+        self.assertFalse(files.called)
+        self.assertFalse(dirs.called)
+        self.assertIsNone(self.app.scope)
+
+    def test_folder_with_a_nested_archive_searches_the_zip_contents(self):
+        # The bug this fixes: the archive itself used to be listed as a hit,
+        # and its contents were never read.
+        logs = os.path.join(self.tmp, 'logs')
+        write(os.path.join(logs, 'sub', 'el2.log'),
+              b'08-28 00:23:09.180 506 522 I TAG: sub_temp is 42\n')
+        write(os.path.join(logs, 'sub', 'bundle.zip'),
+              build_zip({'inside/d.log': b'sub_temp zipped\n'}))
+
+        self.app._load(logs)
+        self.assertTrue(self.pump(), 'tree scan did not finish')
+        self.assertTrue(self.app.scope.flat)
+        self.assertTrue(self.app.scope.local_keys)
+        # The archive went to the cache; the loose files did not.
+        self.assertTrue(os.path.isdir(os.path.join(self.ws, 'archives')))
+
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        vps = sorted(fh.entry.vp for fh in self.app.results._files.values())
+        self.assertEqual(vps, ['sub/bundle.zip/inside/d.log', 'sub/el2.log'])
+
+    def test_deep_subfolders_are_reached(self):
+        # Recursion is the part the user reported broken; pin the depth.
+        logs = os.path.join(self.tmp, 'logs')
+        write(os.path.join(logs, 'a', 'b', 'c', 'd', 'deep.log'),
+              b'sub_temp deep\n')
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+        self.assertEqual(self.app.results.file_count(), 1)
+        self.assertIn('a/b/c/d/deep.log',
+                      [fh.entry.vp for fh in self.app.results._files.values()])
+
+    def test_folder_scope_reads_an_extracted_member_in_detail_and_export(self):
+        # detail/export use scope.source, which for a folder scope is the
+        # hybrid source: it has to route a member to its cache directory.
+        logs = os.path.join(self.tmp, 'logs')
+        write(os.path.join(logs, 'b.zip'),
+              build_zip({'in.log': b'sub_temp inside\n'})
+              )
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        self.app.kw_var.set('sub_temp')
+        self.app.on_search()
+        self.assertTrue(self.pump())
+
+        fh = self.app.results._files[list(self.app.results._files)[0]]
+        lines, trunc = self.app._load_lines(fh.entry)
+        self.assertTrue(any('sub_temp' in ln for ln in lines))
+        self.assertFalse(trunc)
+
+    def test_clear_current_removes_the_archives_extracted_from_the_folder(self):
+        logs = os.path.join(self.tmp, 'logs')
+        write(os.path.join(logs, 'b.zip'), build_zip({'in.log': b'sub_temp\n'}))
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        keys = self.app.scope.local_keys
+        self.assertTrue(keys)
+
+        with patch('log_analyzer.gui.app.messagebox.askyesno', return_value=True):
+            self.app.on_clear(only_current=True)
+        for key in keys:
+            self.assertFalse(os.path.isdir(os.path.join(self.ws, 'archives', key)))
+        self.assertIsNone(self.app.scope)
+
+    def test_clear_current_refuses_a_folder_with_nothing_extracted(self):
+        logs = self._flat_tree()
+        self.app._load(logs)
+        self.assertTrue(self.pump())
+        with patch('log_analyzer.gui.app.messagebox') as mb:
+            self.app.on_clear(only_current=True)
+        self.assertTrue(mb.showinfo.called)
+        self.assertIsNotNone(self.app.scope)
+
     def test_binary_filter_checkbox(self):
         path = os.path.join(self.tmp, 'Log_Z.zip')
         write(path, build_zip({'bin.dat': b'\x00\x01 sub_temp \x00'}))
         from log_analyzer.extractor import extract_archive
         key = archive_key(path)
         man = extract_archive(path, self.ws, key)
-        self.app.key = key
-        self.app.manifest = man
+        self.app._set_scope(for_archive(self.ws, key, man))
 
         self.app.kw_var.set('sub_temp')
         self.app.binary_var.set(True)

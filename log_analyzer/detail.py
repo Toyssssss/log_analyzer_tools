@@ -1,36 +1,25 @@
 import re
 from typing import List, Optional, Sequence, Tuple
 
-from .search import _AFTER_S, _BEFORE_S
+# parse_terms is defined in search.py and re-exported here: the search core and
+# this display-side module must split a keyword box the same way, and search.py
+# cannot import from detail.py without a cycle. Importers of detail still get
+# parse_terms from this module as before.
+from .search import _AFTER_S, _BEFORE_S, parse_terms  # noqa: F401
 
 MAX_DETAIL_BYTES = 8 << 20      # guard: no log file here exceeds 0.5 MB
 MAX_DETAIL_LINES = 60_000
 
-# Separators inside the in-file filter box. Space and comma both work, so
-# "522 517 sub_temp" and "522,517,sub_temp" mean the same thing.
-_TERM_SPLIT = re.compile(r'[\s,;]+')
 
+def terms_pattern(terms: Sequence[str], match_case: bool,
+                  before: Optional[str] = None,
+                  after: Optional[str] = None) -> Optional[re.Pattern]:
+    """One alternation matching ANY term (OR), so a line is scanned once.
 
-def parse_terms(raw: str) -> List[str]:
-    """Split a filter box into terms, preserving order and dropping dupes.
-
-    Process/thread numbers are NOT treated specially: measured on the real
-    corpus only 19.1% of lines are hilog-shaped, so the rest (kmsg, el2, JSON)
-    have no pid column to parse. Matching every term as literal text is the
-    only rule that behaves the same across all of them.
+    before/after wrap EACH term with the lookarounds they carry, which is what
+    whole-word needs: wrapping the alternation instead would tie every branch's
+    boundaries to one shared neighbour pair.
     """
-    out: List[str] = []
-    seen = set()
-    for t in _TERM_SPLIT.split(raw or ''):
-        if not t or t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out
-
-
-def terms_pattern(terms: Sequence[str], match_case: bool) -> Optional[re.Pattern]:
-    """One alternation matching ANY term (OR), so a line is scanned once."""
     terms = [t for t in terms if t]
     if not terms:
         return None
@@ -38,7 +27,10 @@ def terms_pattern(terms: Sequence[str], match_case: bool) -> Optional[re.Pattern
     # matches, so 'sub' listed before 'sub_temp' would highlight the shorter
     # span and leave the rest unstyled.
     terms = sorted(set(terms), key=len, reverse=True)
-    body = '|'.join(re.escape(t) for t in terms)
+    parts = [re.escape(t) for t in terms]
+    if before or after:
+        parts = [(before or '') + p + (after or '') for p in parts]
+    body = '|'.join(parts)
     flags = 0 if match_case else re.IGNORECASE
     return re.compile(body, flags)
 
@@ -58,17 +50,20 @@ def keyword_pattern(keyword: str, match_case: bool = False,
                     whole_word: bool = False) -> Optional[re.Pattern]:
     """The original search keyword as a display-side regex.
 
+    Split and OR'd exactly like the search core (terms_pattern does the same
+    for the in-file filter), so a multi-term keyword highlights everything the
+    search actually matched rather than only its first word.
+
     Whole-word uses the same explicit lookarounds as the search core (not \b,
-    which is wrong next to CJK), so what the pane calls a match is exactly what
-    the search called a match.
+    which is wrong next to CJK), applied to each term individually.
     """
-    if not keyword:
+    terms = parse_terms(keyword)
+    if not terms:
         return None
-    body = re.escape(keyword)
     if whole_word:
-        body = _BEFORE_S.pattern + body + _AFTER_S.pattern
-    flags = 0 if match_case else re.IGNORECASE
-    return re.compile(body, flags)
+        return terms_pattern(terms, match_case, _BEFORE_S.pattern,
+                             _AFTER_S.pattern)
+    return terms_pattern(terms, match_case)
 
 
 def match_ranges(line: str, terms: Sequence[str], match_case: bool,

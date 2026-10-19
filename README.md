@@ -25,12 +25,34 @@ python -m log_analyzer --help          # 命令行
 
 ## 图形界面
 
-1. **Open archive…** 选择压缩包。程序会先遍历目录结构（不实际解压），
-   弹出提示告诉你将展开多大、需要多少磁盘。
+只有一个入口 **Open…**，它先问你要打开哪一类，再弹出对应的原生对话框
+（tkinter 的原生对话框无法在同一个窗口里既选文件又选目录）。两条路径的
+检索语义完全一致，区别只在字节从哪来：
+
+1. **Open… ▸ An archive or a single file…** 选择压缩包。程序会先遍历目录
+   结构（不实际解压），弹出提示告诉你将展开多大、需要多少磁盘。
 2. 解压完成后输入关键词 → **Search**。
 3. 结果列表每个文件一行，含压缩包内的路径与命中数。
    **点击展开**显示该文件的所有命中行；**收起**则只留文件名。
    选中一行，下方显示完整路径与命中内容，可复制。
+
+### 就地检索：打开文件夹与单个文件
+
+- **Open… ▸ A folder…** 选一个目录，**递归检索整棵树**：该目录下的所有
+  文件、所有子目录、以及子目录的子目录里的所有文件。散落的日志文件
+  **就地读取，不复制**，也不占额外磁盘。状态栏会标注
+  `(searched in place)`。符号链接/junction 环会被剪掉，读不到的子目录
+  只记为警告，不会中断整个扫描。
+- **文件夹里的压缩包会被解压后再检索**，而不是把压缩包本身当成一个
+  二进制文件去扫它的压缩字节。也就是说，`logs/sub/bundle.zip` 里的
+  `inside/d.log` 会**以 `sub/bundle.zip/inside/d.log` 这一条结果出现**，
+  内容也真的被搜到。这些压缩包按内容身份存进工作区（key 前缀为
+  `local-`），同一目录再次打开时直接命中缓存，速度很快；文件被改动过
+  则自动重新解压，不会给出过期结果。状态栏会提示「N archive(s) in the
+  folder extracted」，`Clear current archive…` 会把它们删掉（散落文件不受
+  影响）。
+- **Open…** 里选一个**普通文件**（不是压缩包）也一样按单文件就地检索。
+- 改名或删除文件后直接点 **Search**，会提示目录已不存在，不会静默给空结果。
 
 ### 下方详情面板
 
@@ -60,11 +82,28 @@ python -m log_analyzer --help          # 命令行
 
 检索选项：
 
+- **Keyword** —— 空格、逗号或分号分隔多个关键词，多词之间是 **OR**
+  （任意一个命中即算命中），与 **Filter in file** 同一套规则。
+  只填分隔符（如 `,,,`）会提示重新输入，而不是变成「全部命中」
 - **Match case** —— 不勾选（默认）忽略大小写
-- **Whole word** —— 要求匹配两侧不是字母、数字或下划线
+- **Whole word** —— 要求匹配两侧不是字母、数字或下划线；
+  多个关键词时**逐个词**各自要求整词
 - **Hide binary** —— 隐藏含 NUL 字节的文件（默认**不**隐藏）
 
 工作区在 `Workspace` 菜单里可查看占用、按包清理或全部清空。
+
+### 解压目录（Cached）可手动指定
+
+工具栏的 **Change…** 按钮（或 `Workspace ▸ Change workspace…`）可以换一个
+解压目的地，选完即生效并**写入配置文件**，下次启动沿用：
+
+- Windows：`%LOCALAPPDATA%\LogAnalyzer\settings.json`
+- 其他平台：`$XDG_CONFIG_HOME/log-analyzer/settings.json`
+
+工具栏标签会显示当前路径与**来源**（`(saved)` 表示来自配置文件，
+`(LOG_ANALYZER_WORKSPACE)` 表示被环境变量覆盖）。
+作业运行期间不允许切换——正在跑的 worker 会按旧路径写盘。
+若配置文件因权限/杀软占用而写不进去，只会在状态栏提示，切换本身照常生效。
 
 ## 命令行
 
@@ -98,10 +137,15 @@ python -m log_analyzer cache clear Log_CLUSTER_20260901194130.zip
 
 1. `--workspace` 参数
 2. `LOG_ANALYZER_WORKSPACE` 环境变量
-3. Windows：`%LOCALAPPDATA%\LogAnalyzer\workspace`
-4. 其他：`$XDG_CACHE_HOME/log-analyzer` 或 `~/.cache/log-analyzer`
+3. settings.json 里保存的选择（GUI 的 **Change…** 按钮写入）
+4. Windows：`%LOCALAPPDATA%\LogAnalyzer\workspace`
+5. 其他：`$XDG_CACHE_HOME/log-analyzer` 或 `~/.cache/log-analyzer`
    （目录名是历史遗留、故意没跟着产品改名：改了会让已在用的工作区失效、
    需要重新解压）
+
+环境变量**优先于**配置文件是有意的：它是企业/配额受限环境下的正式覆盖
+手段，一个陈旧的配置文件不该悄悄压过它。GUI 会在标签上标出来源，
+所以「Change… 好像没记住」这种情况是可见的。
 
 企业环境里 AppData 常受配额限制，此时用前两种方式改到别处：
 

@@ -26,6 +26,28 @@ _AFTER_B = re.compile(b'(?![' + WORD_BYTES + b'])')
 _BEFORE_S = re.compile(r'(?<!\w)')
 _AFTER_S = re.compile(r'(?!\w)')
 
+# Separators inside the keyword box. Space and comma both work, so
+# "522 517 sub_temp" and "522,517,sub_temp" mean the same thing -- the same
+# rule the detail pane's in-file filter uses.
+TERM_SPLIT = re.compile(r'[\s,;]+')
+
+
+def parse_terms(raw: str) -> List[str]:
+    """Split a keyword box into terms, preserving order and dropping dupes.
+
+    Lives here rather than in detail.py so both the search core and the
+    display-side highlighter can share it without a circular import: detail.py
+    already imports the boundary classes from this module.
+    """
+    out: List[str] = []
+    seen = set()
+    for t in TERM_SPLIT.split(raw or ''):
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
 
 @dataclass(frozen=True)
 class SearchOptions:
@@ -89,21 +111,42 @@ def keyword_is_ascii(keyword: str) -> bool:
 def build_pattern(opts: SearchOptions):
     """Return (compiled_pattern, is_bytes_pattern).
 
-    Keyword is always re.escape'd: this is literal substring search, not a
-    regex mode. ASCII keywords take the bytes path, which avoids decoding every
-    file and is measurably faster on this corpus.
+    Every term is always re.escape'd: this is literal substring search, not a
+    regex mode. Terms are OR'd -- a line is a hit when ANY term matches it --
+    which is the same rule the detail pane's in-file filter applies, so the two
+    boxes behave identically.
+
+    The path is chosen for the whole search, not per term: one non-ASCII term
+    moves every term onto the str path, because a single compiled pattern scans
+    the line once. Whole-word wraps EACH term individually -- wrapping the
+    alternation instead would let '(?<!x)(a|b)(?!y)' demand that both ends of
+    the alternation share one neighbour pair, which is not what 'each term is a
+    whole word' means.
     """
-    if keyword_is_ascii(opts.keyword):
-        pat = re.escape(opts.keyword.encode('ascii'))
+    terms = parse_terms(opts.keyword)
+    if not terms:
+        # An empty alternation would compile to a pattern that matches every
+        # line. Refusing loudly is the only safe option: silently returning
+        # 'everything matched' is the worst possible failure here.
+        raise ValueError('no keyword to search for')
+    # Longest first: with alternation, re picks the leftmost branch that
+    # matches, so 'sub' listed before 'sub_temp' would match the shorter span
+    # and leave the rest unstyled.
+    terms = sorted(set(terms), key=len, reverse=True)
+
+    if all(keyword_is_ascii(t) for t in terms):
+        parts = [re.escape(t.encode('ascii')) for t in terms]
         if opts.whole_word:
-            pat = _BEFORE_B.pattern + pat + _AFTER_B.pattern
+            parts = [_BEFORE_B.pattern + p + _AFTER_B.pattern for p in parts]
+        pat = b'|'.join(parts)
         flags = 0 if opts.match_case else re.IGNORECASE
         return re.compile(pat, flags), True
-    pat = re.escape(opts.keyword)
+    parts = [re.escape(t) for t in terms]
     if opts.whole_word:
         # Explicit lookarounds keep the rule identical on both paths and
         # independent of re.IGNORECASE for the boundary classes.
-        pat = _BEFORE_S.pattern + pat + _AFTER_S.pattern
+        parts = [_BEFORE_S.pattern + p + _AFTER_S.pattern for p in parts]
+    pat = '|'.join(parts)
     flags = re.UNICODE if opts.match_case else (re.UNICODE | re.IGNORECASE)
     return re.compile(pat, flags), False
 

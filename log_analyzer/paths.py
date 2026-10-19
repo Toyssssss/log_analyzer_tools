@@ -42,8 +42,28 @@ def default_workspace_root() -> str:
     return os.path.join(base, 'log-analyzer')
 
 
+def default_config_dir() -> str:
+    """Where settings.json lives.
+
+    On Windows this is the same folder that already holds 'workspace', so the
+    app does not scatter a second directory across the profile and the
+    preference stays out of a roaming profile. On POSIX config belongs in
+    XDG_CONFIG_HOME even though the multi-GB cache belongs in XDG_CACHE_HOME.
+    """
+    if WINDOWS:
+        base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        return os.path.join(base, 'LogAnalyzer')
+    base = os.environ.get('XDG_CONFIG_HOME') or os.path.join(
+        os.path.expanduser('~'), '.config')
+    return os.path.join(base, 'log-analyzer')
+
+
 def workspace_root(explicit: str = None) -> str:
-    """Resolution order: explicit -> LOG_ANALYZER_WORKSPACE -> platform default."""
+    """Resolution order: explicit -> LOG_ANALYZER_WORKSPACE -> platform default.
+
+    Callers that also want the persisted preference use settings.resolve_workspace
+    instead; this stays the single place that normalises a workspace path.
+    """
     root = explicit or os.environ.get('LOG_ANALYZER_WORKSPACE') or default_workspace_root()
     return os.path.abspath(os.path.expanduser(root))
 

@@ -15,9 +15,12 @@ tens to low hundreds), and a file's lines are materialised the first time the
     expand/collapse behaviour the results are meant to have.
     """
 
-    def __init__(self, master, on_select=None):
+    def __init__(self, master, on_select=None, on_export_txt=None):
         super().__init__(master)
         self.on_select = on_select or (lambda fh: None)
+        # Both callbacks are supplied by App: this widget knows about rows, not
+        # about the workspace, the source, or where files should be written.
+        self.on_export_txt = on_export_txt or (lambda fh: None)
         self._files = {}        # iid -> FileHits
         self._lines = {}        # iid -> set of child iids already built
 
@@ -45,6 +48,8 @@ tens to low hundreds), and a file's lines are materialised the first time the
         self.columnconfigure(0, weight=1)
 
         self.popup = tk.Menu(self, tearoff=0)
+        self.popup.add_command(label='Export as text file…',
+                               command=self._export_txt)
         self.popup.add_command(label='Copy virtual path',
                                command=self._copy_vp)
         self.popup.add_separator()
@@ -67,6 +72,11 @@ tens to low hundreds), and a file's lines are materialised the first time the
             self.popup.tk_popup(event.x_root, event.y_root)
         finally:
             self.popup.grab_release()
+
+    def _export_txt(self):
+        fh = self.selected_file()
+        if fh is not None:
+            self.on_export_txt(fh)
 
     def _copy_vp(self):
         fh = self.selected_file()
@@ -117,10 +127,19 @@ tens to low hundreds), and a file's lines are materialised the first time the
             self._files[iid] = fh
 
     def selected_file(self):
+        """The FileHits behind the selection, whatever kind of row it is.
+
+        A hit line is a child node, not a key in _files, so right-clicking one
+        has to climb to its file row -- otherwise the context menu would act
+        on the line the user happened to click and silently do nothing.
+        """
         sel = self.tree.selection()
         if not sel:
             return None
-        return self._files.get(sel[0])
+        iid = sel[0]
+        if iid not in self._files:
+            iid = self.tree.parent(iid)
+        return self._files.get(iid)
 
     def expand_all(self):
         for iid in list(self._files):

@@ -10,7 +10,8 @@ from .manifest import (
     clear_workspace, index_upsert, inspect_workspace, load_index, make_ref,
     scan_workspace,
 )
-from .paths import archive_key, human_bytes, workspace_root
+from .paths import archive_key, human_bytes
+from .settings import resolve_workspace
 from .search import SearchOptions, search
 from .source import DiskSource
 
@@ -63,19 +64,19 @@ def cmd_scan(args):
 
 
 def cmd_extract(args):
-    ws_root = workspace_root(args.workspace)
+    ws_root, origin = resolve_workspace(args.workspace)
     path = os.path.abspath(args.archive)
     key = archive_key(path)
     man, did = _prepare(args, ws_root, path, key)
     action = 'extracted' if did else 'already cached'
     print('%s: %d files, %s, status=%s' % (
         action, len(man.entries), human_bytes(man.total_bytes), man.status))
-    print('workspace: %s' % os.path.join(ws_root, 'archives', key))
+    print('workspace: %s (%s)' % (os.path.join(ws_root, 'archives', key), origin))
     return 0
 
 
 def cmd_search(args):
-    ws_root = workspace_root(args.workspace)
+    ws_root, origin = resolve_workspace(args.workspace)
     path = os.path.abspath(args.archive)
     key = archive_key(path)
     man, _did = _prepare(args, ws_root, path, key)
@@ -131,19 +132,20 @@ def cmd_search(args):
 
 
 def cmd_cache(args):
-    ws_root = workspace_root(args.workspace)
+    ws_root, origin = resolve_workspace(args.workspace)
     if args.action == 'list':
         info = scan_workspace(ws_root)
         if not info['archives']:
-            print('workspace is empty (%s)' % ws_root)
+            print('workspace is empty (%s, %s)' % (ws_root, origin))
             return 0
         for a in sorted(info['archives'], key=lambda x: x.get('display_name', '')):
             print('%-40s %8s  %6s files  %s' % (
                 (a.get('display_name') or a.get('key'))[:40],
                 human_bytes(a.get('bytes', 0)), a.get('files', '?'),
                 a.get('status', '?')))
-        print('total: %s in %d archives' % (
-            human_bytes(info['total_bytes']), len(info['archives'])))
+        print('total: %s in %d archives (%s, %s)' % (
+            human_bytes(info['total_bytes']), len(info['archives']),
+            ws_root, origin))
         return 0
     if args.action == 'clear':
         key = archive_key(args.archive) if args.archive else None
@@ -163,7 +165,8 @@ def build_parser():
         prog='Cluster-log-analyzer',
         description='Recursive nested-archive log extractor and keyword search')
     p.add_argument('--version', action='version', version=__version__)
-    p.add_argument('--workspace', help='workspace root (overrides env and default)')
+    p.add_argument('--workspace',
+                   help='workspace root (overrides env, saved setting and default)')
     sub = p.add_subparsers(dest='cmd')
 
     s = sub.add_parser('gui', help='launch the graphical interface')

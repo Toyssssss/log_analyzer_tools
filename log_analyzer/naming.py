@@ -1,6 +1,12 @@
+import re
 import zipfile
 
 _ALT_CODECS = ('utf-8', 'gbk', 'big5')
+
+# Characters no mainstream filesystem accepts. Also covers the ASCII control
+# range, which Tk's save dialog would otherwise pass straight through.
+_UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_MAX_STEM = 80
 
 
 def decode_entry_name(info: zipfile.ZipInfo) -> str:
@@ -50,6 +56,42 @@ def join_vp(prefix: str, name: str) -> str:
     if not prefix:
         return name
     return prefix + '/' + name
+
+
+def export_stem(vp: str) -> str:
+    """A safe, recognisable default filename stem for exporting one member.
+
+    The virtual path is unusable as a filename twice over: it is hundreds of
+    characters of nested archive names, and it contains characters Windows
+    rejects outright (':' from drive-free archive names, '|', control bytes
+    from a mis-decoded member). So this keeps only the last two segments --
+    enough to tell 'hilog/el2.log' from 'kmsg/el2.log' -- drops the member's
+    own extension, strips anything a filesystem would refuse, and caps the
+    length so the save dialog opens without the name scrolling off screen.
+
+    'a.zip/.../Eventid_x_rda_el2.zip/hilog/el2.log' -> 'hilog_el2'
+    """
+    parts = [p for p in vp.split('/') if p and p not in ('.', '..')]
+    if not parts:
+        return 'export'
+    # Every export is written as .txt, so keeping the member's own extension
+    # here would only produce names like 'el2.log.txt'. rpartition rather than
+    # splitext so a name that is nothing but an extension ('.log') survives
+    # intact instead of collapsing to an empty stem.
+    head, dot, _ext = parts[-1].rpartition('.')
+    if dot and head:
+        parts[-1] = head
+    stem = '_'.join(parts[-2:]) if len(parts) > 1 else parts[0]
+    stem = _UNSAFE_FILENAME.sub('_', stem).strip(' .')
+    # Collapse the runs of '_' the substitution above can leave behind.
+    stem = re.sub(r'_{2,}', '_', stem)
+    if len(stem) > _MAX_STEM:
+        # Trim the middle rather than the tail: the tail carries the line of
+        # the virtual path that actually identifies the file.
+        keep = _MAX_STEM - 1
+        front = keep // 2
+        stem = stem[:front] + '~' + stem[-(keep - front):]
+    return stem or 'export'
 
 
 def shorten_vp(vp: str, maxlen: int = 120) -> str:

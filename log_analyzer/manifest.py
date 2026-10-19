@@ -34,6 +34,12 @@ class FileEntry:
     depth: int                  # archive layers traversed to reach this file
     parent: Optional[str] = None   # vp of the immediately enclosing archive
     binary: bool = False
+    # Overrides the scope's source key for this one entry. '' means 'use the
+    # scope default', so every existing entry and manifest round-trips
+    # unchanged. A folder scope sets it to the local handoff key on entries
+    # that came out of an archive found inside the folder, which is what lets
+    # one search span two sources (the folder, and that archive's cache dir).
+    key: str = ''
 
     @property
     def name(self) -> str:
@@ -95,7 +101,8 @@ class Manifest:
             'warnings': d['warnings'],
             'entries': [
                 {'id': e['id'], 'vp': e['vp'], 'disk': e['disk'], 'size': e['size'],
-                 'depth': e['depth'], 'parent': e['parent'], 'binary': e['binary']}
+                 'depth': e['depth'], 'parent': e['parent'], 'binary': e['binary'],
+                 'key': e.get('key', '')}
                 for e in d['entries']
             ],
         }
@@ -119,7 +126,8 @@ class Manifest:
             m.entries.append(FileEntry(
                 id=e.get('id', 0), vp=e.get('vp', ''), disk=e.get('disk', ''),
                 size=e.get('size', 0), depth=e.get('depth', 0),
-                parent=e.get('parent'), binary=e.get('binary', False)))
+                parent=e.get('parent'), binary=e.get('binary', False),
+                key=e.get('key', '')))
         return m
 
 
@@ -173,7 +181,8 @@ def append_partial(ws_root: str, key: str, entries: List[FileEntry],
         'top_index': top_index,
         'entries': [
             {'id': e.id, 'vp': e.vp, 'disk': e.disk, 'size': e.size,
-             'depth': e.depth, 'parent': e.parent, 'binary': e.binary}
+             'depth': e.depth, 'parent': e.parent, 'binary': e.binary,
+             'key': e.key}
             for e in entries
         ],
     }
@@ -210,7 +219,8 @@ def read_partial(ws_root: str, key: str):
                 entries.append(FileEntry(
                     id=e.get('id', 0), vp=e.get('vp', ''), disk=e.get('disk', ''),
                     size=e.get('size', 0), depth=e.get('depth', 0),
-                    parent=e.get('parent'), binary=e.get('binary', False)))
+                    parent=e.get('parent'), binary=e.get('binary', False),
+                    key=e.get('key', '')))
     return entries, done, bad
 
 

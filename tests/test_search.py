@@ -5,7 +5,7 @@ import unittest
 
 from log_analyzer.extractor import CancelToken
 from log_analyzer.search import (
-    SearchOptions, build_pattern, keyword_is_ascii, search,
+    SearchOptions, build_pattern, keyword_is_ascii, parse_terms, search,
 )
 
 
@@ -33,6 +33,13 @@ def run(lines, keyword, **kw):
                SearchOptions(keyword, **kw),
                cancel=CancelToken(), sink=got.extend)
     return got, s
+
+
+def total_hits(lines, keyword, **kw):
+    """Matching LINES across the run. run()'s list is one FileHits per file,
+    and every line here lives in the same file, so its length is always 1."""
+    got, _ = run(lines, keyword, **kw)
+    return sum(f.total_hits for f in got)
 
 
 class PatternTest(unittest.TestCase):
@@ -88,6 +95,63 @@ class WholeWordTest(unittest.TestCase):
         got, _ = run(['温度传感器=5'.encode('utf-8')],
                      '温度', whole_word=True)
         self.assertEqual(got, [])
+
+
+class MultiKeywordTest(unittest.TestCase):
+    """The keyword box splits on whitespace/comma/semicolon and ORs the terms,
+    exactly like the detail pane's in-file filter."""
+
+    def test_terms_are_ored(self):
+        lines = [b'aaa one', b'bbb two', b'ccc three']
+        self.assertEqual(total_hits(lines, 'aaa bbb'), 2)
+
+    def test_separators_are_interchangeable(self):
+        lines = [b'aaa one', b'bbb two', b'ccc three']
+        for kw in ('aaa bbb', 'aaa,bbb', 'aaa;bbb', 'aaa, bbb', '  aaa ,; bbb  '):
+            self.assertEqual(total_hits(lines, kw), 2, 'keyword %r' % kw)
+
+    def test_or_not_and(self):
+        # A line carrying only one of the terms is still a hit; requiring both
+        # would make the box silently useless on this corpus.
+        self.assertEqual(total_hits([b'only aaa here'], 'aaa bbb'), 1)
+
+    def test_single_keyword_is_unchanged(self):
+        self.assertEqual(total_hits([b'sub_temp is 42'], 'sub_temp'), 1)
+
+    def test_whole_word_applies_to_each_term(self):
+        # Each term gets its own boundary pair. Wrapping the alternation
+        # instead would be wrong: the next term's prefix is not a boundary
+        # neighbour of this term's characters.
+        lines = [b'sub_temp_extra', b'x522', b'sub_temp ok']
+        self.assertEqual(total_hits(lines, 'sub_temp 522', whole_word=True), 1)
+
+    def test_one_non_ascii_term_moves_the_whole_search_to_str(self):
+        pat, is_bytes = build_pattern(SearchOptions('sub_temp 温度'))
+        self.assertFalse(is_bytes)
+        self.assertIsInstance(pat.pattern, str)
+        lines = ['温度=5'.encode('utf-8'), b'sub_temp=6']
+        self.assertEqual(total_hits(lines, 'sub_temp 温度'), 2)
+
+    def test_longest_term_is_tried_first(self):
+        # re picks the leftmost matching branch, so 'sub' listed first would
+        # win the match and report the shorter span.
+        pat, _ = build_pattern(SearchOptions('sub sub_temp'))
+        m = pat.search(b'xx sub_temp yy')
+        self.assertEqual(m.group(0), b'sub_temp')
+
+    def test_duplicate_terms_collapse(self):
+        self.assertEqual(total_hits([b'sub_temp is 42'], 'sub_temp sub_temp'), 1)
+
+    def test_a_box_of_only_separators_raises(self):
+        # An empty alternation compiles to a pattern that matches everything;
+        # silently returning 'all lines matched' is the worst failure here.
+        for kw in (',,,', '   ', '; ,'):
+            with self.assertRaises(ValueError):
+                build_pattern(SearchOptions(kw))
+
+    def test_parse_terms_is_the_same_rule_as_the_in_file_filter(self):
+        self.assertEqual(parse_terms('522, 517;sub_temp'),
+                         ['522', '517', 'sub_temp'])
 
 
 class CaseTest(unittest.TestCase):
